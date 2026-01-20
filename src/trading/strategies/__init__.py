@@ -19,6 +19,19 @@ from .aggressive_momentum import (
 )
 from .breakout import BreakoutStrategy, BreakoutConfig
 from .ensemble import EnsembleStrategy, EnsembleConfig
+from .regime_detector import (
+    RegimeType,
+    RegimeChange,
+    RegimeDetector,
+    RegimeDetectorConfig,
+)
+from .strategy_blender import (
+    StrategyBlender,
+    StrategyBlenderConfig,
+    StrategyWeight,
+    BlendedSignal,
+    DEFAULT_REGIME_WEIGHTS,
+)
 
 __all__ = [
     "BaseStrategy",
@@ -43,4 +56,13 @@ __all__ = [
     "BreakoutConfig",
     "EnsembleStrategy",
     "EnsembleConfig",
+    "RegimeType",
+    "RegimeChange",
+    "RegimeDetector",
+    "RegimeDetectorConfig",
+    "StrategyBlender",
+    "StrategyBlenderConfig",
+    "StrategyWeight",
+    "BlendedSignal",
+    "DEFAULT_REGIME_WEIGHTS",
 ]

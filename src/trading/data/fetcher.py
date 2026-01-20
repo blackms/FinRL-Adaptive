@@ -296,6 +296,78 @@ class SP500DataFetcher:
 
         return sorted_symbols[:n]
 
+    def validate_ohlcv(self, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Validate and fix OHLC data consistency.
+
+        Ensures data integrity by:
+        - Enforcing high >= max(open, close)
+        - Enforcing low <= min(open, close)
+        - Removing rows with zero/negative prices
+        - Logging warnings for suspicious price gaps (>50% moves)
+
+        Args:
+            df: DataFrame with OHLCV data. Must have columns:
+                open, high, low, close, volume (case-insensitive).
+
+        Returns:
+            Cleaned DataFrame with validated OHLCV data.
+
+        Example:
+            >>> validated_df = fetcher.validate_ohlcv(raw_df)
+        """
+        if df.empty:
+            return df
+
+        # Make a copy to avoid modifying original
+        df = df.copy()
+
+        # Normalize column names to lowercase
+        col_mapping = {col: col.lower() for col in df.columns}
+        df = df.rename(columns=col_mapping)
+
+        # Check required columns exist
+        required_cols = ["open", "high", "low", "close"]
+        missing_cols = [col for col in required_cols if col not in df.columns]
+        if missing_cols:
+            logger.warning(f"Missing required columns for validation: {missing_cols}")
+            return df
+
+        # Ensure high >= max(open, close)
+        df["high"] = df[["open", "close", "high"]].max(axis=1)
+
+        # Ensure low <= min(open, close)
+        df["low"] = df[["open", "close", "low"]].min(axis=1)
+
+        # Remove rows with zero/negative prices
+        original_len = len(df)
+        df = df[(df["close"] > 0) & (df["open"] > 0) & (df["high"] > 0) & (df["low"] > 0)]
+
+        # Handle volume column if present
+        if "volume" in df.columns:
+            df = df[df["volume"] >= 0]
+
+        removed_rows = original_len - len(df)
+        if removed_rows > 0:
+            logger.warning(
+                f"Removed {removed_rows} rows with invalid prices (zero/negative)"
+            )
+
+        # Check for suspicious gaps (>50% overnight moves)
+        if len(df) > 1:
+            df["_pct_change"] = df["close"].pct_change().abs()
+            suspicious = df[df["_pct_change"] > 0.5]
+
+            if len(suspicious) > 0:
+                logger.warning(
+                    f"Found {len(suspicious)} suspicious price moves >50%: "
+                    f"dates={suspicious['datetime'].tolist() if 'datetime' in suspicious.columns else 'N/A'}"
+                )
+
+            df = df.drop(columns=["_pct_change"], errors="ignore")
+
+        return df
+
     def fetch_ohlcv(
         self,
         symbols: list[str],
@@ -374,6 +446,13 @@ class SP500DataFetcher:
                 # Rename 'date' to 'datetime' if present
                 if "date" in df.columns:
                     df = df.rename(columns={"date": "datetime"})
+
+                # Validate and fix OHLCV data consistency
+                df = self.validate_ohlcv(df)
+
+                if df.empty:
+                    logger.warning(f"No valid data after validation for {symbol}")
+                    return StockData(symbol=symbol, data=pd.DataFrame())
 
                 # Get additional info
                 info = ticker.info

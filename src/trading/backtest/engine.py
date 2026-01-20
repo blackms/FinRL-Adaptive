@@ -245,22 +245,97 @@ class BacktestEngine:
         self,
         price: float,
         is_buy: bool,
+        order_value: float = 0,
+        avg_daily_volume: float = 1e9,
     ) -> float:
         """
-        Apply slippage to a price.
+        Apply slippage with market impact scaling.
+
+        Market impact increases with order size relative to daily volume,
+        following the square-root law commonly observed in market microstructure.
 
         Args:
             price: Original price.
             is_buy: Whether this is a buy order.
+            order_value: Total value of the order in dollars.
+            avg_daily_volume: Average daily trading volume in dollars.
+                             Defaults to large number if unknown.
 
         Returns:
-            Price with slippage applied.
+            Price with slippage and market impact applied.
         """
-        slippage = price * self.config.slippage_rate
-        if is_buy:
-            return price + slippage
+        # Base slippage
+        base_slippage = price * self.config.slippage_rate
+
+        # Market impact: scales with square root of order size relative to volume
+        # This follows the empirical square-root law for market impact
+        if avg_daily_volume > 0 and order_value > 0:
+            volume_fraction = order_value / avg_daily_volume
+            market_impact = base_slippage * (volume_fraction ** 0.5)
         else:
-            return price - slippage
+            market_impact = 0
+
+        total_slippage = base_slippage + market_impact
+
+        if is_buy:
+            return price + total_slippage
+        else:
+            return price - total_slippage
+
+    def _get_daily_volume(
+        self,
+        symbol: str,
+        date: datetime,
+        lookback: int = 20,
+    ) -> float:
+        """
+        Get average daily trading volume for a symbol.
+
+        Args:
+            symbol: Ticker symbol.
+            date: Current date.
+            lookback: Number of days to average volume over.
+
+        Returns:
+            Average daily volume in shares.
+        """
+        data = self._get_data_for_date(symbol, date, lookback)
+        if data.empty:
+            return 0.0
+
+        volume_col = "volume" if "volume" in data.columns else "Volume"
+        if volume_col in data.columns:
+            return float(data[volume_col].mean())
+        return 0.0
+
+    def _calculate_max_fill(
+        self,
+        symbol: str,
+        date: datetime,
+        price: float,
+        max_volume_pct: float = 0.10,
+    ) -> float:
+        """
+        Calculate maximum fillable quantity based on daily volume.
+
+        Limits order size to a percentage of average daily volume to ensure
+        realistic execution assumptions and avoid market impact issues.
+
+        Args:
+            symbol: Ticker symbol.
+            date: Current date.
+            price: Current price per share.
+            max_volume_pct: Maximum percentage of daily volume to allow.
+                           Defaults to 10%.
+
+        Returns:
+            Maximum fillable quantity in shares.
+        """
+        daily_volume = self._get_daily_volume(symbol, date)
+        if daily_volume <= 0:
+            return float("inf")  # No limit if volume unknown
+
+        return daily_volume * max_volume_pct
 
     def _get_data_for_date(
         self,
@@ -305,14 +380,19 @@ class BacktestEngine:
     def _process_signals(
         self,
         date: datetime,
-        prices: dict[str, float],
+        available_symbols: set[str] | None = None,
     ) -> list[Signal]:
         """
         Generate signals from all strategies for the current date.
 
+        IMPORTANT: This method uses data STRICTLY BEFORE the current date
+        to prevent look-ahead bias. Signals are generated based on information
+        available at market open, before the current day's price is known.
+
         Args:
-            date: Current date.
-            prices: Current prices for all symbols.
+            date: Current date (signals will use data before this date).
+            available_symbols: Set of symbols with valid data. If None, all symbols
+                             in self._data are processed.
 
         Returns:
             List of generated signals.
@@ -320,10 +400,12 @@ class BacktestEngine:
         all_signals: list[Signal] = []
 
         for symbol in self._data.keys():
-            if symbol not in prices:
+            # Skip if symbol not in available set (when specified)
+            if available_symbols is not None and symbol not in available_symbols:
                 continue
 
-            # Get historical data for the symbol
+            # Get historical data for the symbol - STRICTLY BEFORE current date
+            # This ensures no look-ahead bias: we only see data available at market open
             lookback = max(
                 self.config.warmup_period,
                 max(s.config.lookback_period for s in self._strategies) * 2,
@@ -393,6 +475,15 @@ class BacktestEngine:
                 atr=atr,
             )
 
+            # Apply volume-based fill limits
+            max_fill = self._calculate_max_fill(symbol, date, current_price)
+            if abs(position_size) > max_fill:
+                logger.debug(
+                    f"Position size {position_size:.2f} exceeds max fill {max_fill:.2f} "
+                    f"for {symbol}. Limiting to {max_fill:.2f}."
+                )
+                position_size = max_fill if position_size > 0 else -max_fill
+
             # Apply position limits
             if not self.config.enable_fractional:
                 position_size = int(position_size)
@@ -403,11 +494,18 @@ class BacktestEngine:
             # Check if we already have a position
             existing_position = self._portfolio.get_position(symbol)
 
+            # Calculate average daily volume for market impact
+            daily_volume = self._get_daily_volume(symbol, date)
+            avg_daily_volume_value = daily_volume * current_price if daily_volume > 0 else 1e9
+
             # Handle signal based on type
             if signal.is_buy:
                 if existing_position and existing_position.is_short:
                     # Close short position first
-                    close_price = self._get_price_with_slippage(current_price, True)
+                    close_value = abs(existing_position.quantity) * current_price
+                    close_price = self._get_price_with_slippage(
+                        current_price, True, close_value, avg_daily_volume_value
+                    )
                     self._portfolio.close_position(symbol, close_price, date)
                     existing_position = None
 
@@ -428,8 +526,11 @@ class BacktestEngine:
                         logger.debug(f"Position rejected: {reason}")
                         continue
 
-                    # Execute buy order
-                    fill_price = self._get_price_with_slippage(current_price, True)
+                    # Execute buy order with market impact
+                    order_value = abs(position_size) * current_price
+                    fill_price = self._get_price_with_slippage(
+                        current_price, True, order_value, avg_daily_volume_value
+                    )
                     order = self._portfolio.create_order(
                         symbol=symbol,
                         side=OrderSide.BUY,
@@ -440,8 +541,11 @@ class BacktestEngine:
 
             elif signal.is_sell:
                 if existing_position and existing_position.is_long:
-                    # Close long position
-                    close_price = self._get_price_with_slippage(current_price, False)
+                    # Close long position with market impact
+                    close_value = abs(existing_position.quantity) * current_price
+                    close_price = self._get_price_with_slippage(
+                        current_price, False, close_value, avg_daily_volume_value
+                    )
                     self._portfolio.close_position(symbol, close_price, date)
 
                 elif self.config.enable_shorting and not existing_position:
@@ -449,7 +553,10 @@ class BacktestEngine:
                     if len(self._portfolio.positions) >= self.config.max_positions:
                         continue
 
-                    fill_price = self._get_price_with_slippage(current_price, False)
+                    order_value = abs(position_size) * current_price
+                    fill_price = self._get_price_with_slippage(
+                        current_price, False, order_value, avg_daily_volume_value
+                    )
                     order = self._portfolio.create_order(
                         symbol=symbol,
                         side=OrderSide.SELL,
@@ -496,8 +603,18 @@ class BacktestEngine:
         # Close positions that hit stop loss
         for symbol in positions_to_close:
             if symbol in prices:
-                is_long = self._portfolio.positions[symbol].is_long
-                close_price = self._get_price_with_slippage(prices[symbol], not is_long)
+                position = self._portfolio.positions[symbol]
+                current_price = prices[symbol]
+                is_long = position.is_long
+
+                # Calculate market impact for stop loss execution
+                close_value = abs(position.quantity) * current_price
+                daily_volume = self._get_daily_volume(symbol, date)
+                avg_daily_volume_value = daily_volume * current_price if daily_volume > 0 else 1e9
+
+                close_price = self._get_price_with_slippage(
+                    current_price, not is_long, close_value, avg_daily_volume_value
+                )
                 self._portfolio.close_position(symbol, close_price, date)
                 logger.debug(f"Stop loss triggered for {symbol} at {close_price}")
 
@@ -590,20 +707,38 @@ class BacktestEngine:
         for i, date in enumerate(sorted_dates):
             self._current_date = date
 
-            # Get current prices
+            # IMPORTANT: Look-ahead bias protection
+            # 1. Signal generation uses data STRICTLY BEFORE current date
+            #    (via _get_data_for_date which filters datetime < date)
+            # 2. Execution uses current date's close price (end-of-day execution model)
+
+            # First, determine which symbols have data for today (for execution later)
+            available_symbols: set[str] = set()
+            for symbol in self._data.keys():
+                data_df = self._get_data_for_date(symbol, date + timedelta(days=1), 1)
+                if not data_df.empty:
+                    available_symbols.add(symbol)
+
+            # Generate signals using only historical data (STRICTLY BEFORE current day)
+            # This simulates decision-making at market open with prior day's data
+            signals = self._process_signals(date, available_symbols)
+            self._signals.extend(signals)
+
+            # Now get current day's close prices for execution (after signals are generated)
+            # This represents end-of-day execution at the close
             prices: dict[str, float] = {}
-            for symbol, df in self._data.items():
+            for symbol in available_symbols:
+                # Get the close price for the current date
+                # Use date + 1 day as end_date to include current day in the result
                 data_df = self._get_data_for_date(symbol, date + timedelta(days=1), 1)
                 if not data_df.empty:
                     close_col = "close" if "close" in data_df.columns else "Close"
                     prices[symbol] = float(data_df[close_col].iloc[-1])
 
-            # Update stop losses
+            # Update stop losses with current prices
             self._update_stop_losses(prices, date)
 
-            # Generate and execute signals
-            signals = self._process_signals(date, prices)
-            self._signals.extend(signals)
+            # Execute signals at current day's close price
             self._execute_signals(signals, prices, date)
 
             # Record state
@@ -757,6 +892,174 @@ class BacktestEngine:
         logger.info(f"Best params: {best_params}, {metric}={best_metric_value:.4f}")
 
         return best_params, best_result
+
+    def walk_forward_optimize(
+        self,
+        param_grid: dict[str, list[Any]],
+        train_months: int = 12,
+        test_months: int = 3,
+        metric: str = "sharpe_ratio",
+    ) -> dict[str, Any]:
+        """
+        Walk-forward optimization to avoid overfitting.
+
+        Splits data into rolling train/test windows:
+        - Train on train_months, test on next test_months
+        - Roll forward and repeat
+        - Returns average out-of-sample performance
+
+        This approach provides more realistic performance estimates
+        by preventing optimization from seeing future data.
+
+        Args:
+            param_grid: Dictionary of parameter names to lists of values.
+            train_months: Number of months for training window.
+            test_months: Number of months for testing window.
+            metric: Metric to optimize (sharpe_ratio, total_return, etc.).
+
+        Returns:
+            Dictionary containing:
+            - best_params: Best parameters found
+            - avg_oos_metric: Average out-of-sample metric value
+            - oos_results: List of out-of-sample results per window
+            - in_sample_results: List of in-sample results per window
+            - windows: List of (train_start, train_end, test_start, test_end) tuples
+        """
+        if not self._data:
+            raise ValueError("No data set for walk-forward optimization")
+
+        # Get full date range from data
+        all_dates: set[datetime] = set()
+        for df in self._data.values():
+            if "datetime" in df.columns:
+                dates = pd.to_datetime(df["datetime"])
+            elif "date" in df.columns:
+                dates = pd.to_datetime(df["date"])
+            else:
+                dates = pd.to_datetime(df.index)
+            all_dates.update(dates.tolist())
+
+        sorted_dates = sorted(all_dates)
+
+        if len(sorted_dates) < 2:
+            raise ValueError("Insufficient data for walk-forward optimization")
+
+        start_date = sorted_dates[0]
+        end_date = sorted_dates[-1]
+
+        # Calculate window positions
+        windows: list[tuple[datetime, datetime, datetime, datetime]] = []
+        current_start = start_date
+
+        while True:
+            train_end = current_start + timedelta(days=train_months * 30)
+            test_start = train_end
+            test_end = test_start + timedelta(days=test_months * 30)
+
+            if test_end > end_date:
+                break
+
+            windows.append((current_start, train_end, test_start, test_end))
+
+            # Roll forward by test_months
+            current_start = current_start + timedelta(days=test_months * 30)
+
+        if not windows:
+            raise ValueError(
+                f"Insufficient data for walk-forward optimization. "
+                f"Need at least {train_months + test_months} months of data."
+            )
+
+        logger.info(f"Walk-forward optimization with {len(windows)} windows")
+
+        oos_results: list[BacktestResult] = []
+        in_sample_results: list[BacktestResult] = []
+        best_params_per_window: list[dict[str, Any]] = []
+
+        for i, (train_start, train_end, test_start, test_end) in enumerate(windows):
+            logger.info(
+                f"Window {i + 1}/{len(windows)}: "
+                f"Train {train_start.date()} to {train_end.date()}, "
+                f"Test {test_start.date()} to {test_end.date()}"
+            )
+
+            # In-sample optimization on training period
+            try:
+                best_params, in_sample_result = self.optimize(
+                    param_grid=param_grid,
+                    metric=metric,
+                )
+                # Re-run with full training period
+                in_sample_result = self.run(
+                    start_date=train_start,
+                    end_date=train_end,
+                )
+                in_sample_results.append(in_sample_result)
+                best_params_per_window.append(best_params)
+
+                # Out-of-sample test with optimized parameters
+                # Apply best parameters to strategies
+                for strategy in self._strategies:
+                    for name, value in best_params.items():
+                        if hasattr(strategy.config, name):
+                            setattr(strategy.config, name, value)
+
+                oos_result = self.run(
+                    start_date=test_start,
+                    end_date=test_end,
+                )
+                oos_results.append(oos_result)
+
+                logger.info(
+                    f"  In-sample {metric}: {getattr(in_sample_result, metric, 0):.4f}, "
+                    f"Out-of-sample {metric}: {getattr(oos_result, metric, 0):.4f}"
+                )
+
+            except Exception as e:
+                logger.warning(f"Window {i + 1} failed: {e}")
+                continue
+
+        if not oos_results:
+            raise RuntimeError("Walk-forward optimization failed - no valid results")
+
+        # Calculate average out-of-sample metrics
+        avg_oos_metric = np.mean([getattr(r, metric, 0) for r in oos_results])
+        avg_is_metric = np.mean([getattr(r, metric, 0) for r in in_sample_results])
+
+        # Find the most common best parameters (mode)
+        from collections import Counter
+        param_counts: dict[str, Counter] = {}
+        for params in best_params_per_window:
+            for name, value in params.items():
+                if name not in param_counts:
+                    param_counts[name] = Counter()
+                param_counts[name][value] += 1
+
+        best_params = {
+            name: counter.most_common(1)[0][0]
+            for name, counter in param_counts.items()
+        }
+
+        # Calculate degradation ratio (in-sample vs out-of-sample)
+        degradation = (avg_is_metric - avg_oos_metric) / abs(avg_is_metric) if avg_is_metric != 0 else 0
+
+        logger.info(
+            f"Walk-forward results: "
+            f"Avg in-sample {metric}={avg_is_metric:.4f}, "
+            f"Avg out-of-sample {metric}={avg_oos_metric:.4f}, "
+            f"Degradation={degradation:.2%}"
+        )
+
+        return {
+            "best_params": best_params,
+            "avg_oos_metric": avg_oos_metric,
+            "avg_is_metric": avg_is_metric,
+            "degradation": degradation,
+            "oos_results": oos_results,
+            "in_sample_results": in_sample_results,
+            "windows": windows,
+            "n_windows": len(windows),
+        }
 
 
 __all__ = [
