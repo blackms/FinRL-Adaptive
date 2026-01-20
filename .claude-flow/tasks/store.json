@@ -1,0 +1,18 @@
+{
+  "tasks": {
+    "task-1768865933325-8dh39m": {
+      "taskId": "task-1768865933325-8dh39m",
+      "type": "research",
+      "description": "Create a FinRL software to trade with RL top 100 s&p 500 tickers using finrl library",
+      "priority": "normal",
+      "status": "pending",
+      "progress": 0,
+      "assignedTo": [],
+      "tags": [],
+      "createdAt": "2026-01-19T23:38:53.325Z",
+      "startedAt": null,
+      "completedAt": null
+    }
+  },
+  "version": "3.0.0"
+}

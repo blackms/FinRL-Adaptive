@@ -1,0 +1,33 @@
+{
+  "strategy_name": "Aggressive Momentum",
+  "parameters": {
+    "rsi_period": 10,
+    "rsi_overbought": 60.0,
+    "rsi_oversold": 40.0,
+    "fast_ma_period": 5,
+    "slow_ma_period": 15,
+    "position_size": 0.2
+  },
+  "performance": {
+    "total_return": 9.257551560630638,
+    "vs_buy_hold": -49.13405142824181,
+    "sharpe_ratio": 1.3119726912210437,
+    "max_drawdown": 2.66346189216618,
+    "win_rate": 63.33333333333333,
+    "total_trades": 60,
+    "profit_factor": 2.3228061714721573
+  },
+  "backtest_info": {
+    "symbols": [
+      "AAPL",
+      "MSFT",
+      "GOOGL",
+      "AMZN",
+      "NVDA"
+    ],
+    "start_date": "2024-01-01",
+    "end_date": "2024-12-31",
+    "initial_capital": 100000.0
+  },
+  "generated_at": "2026-01-20T14:59:53.339712"
+}

@@ -1,0 +1,43 @@
+# Core dependencies
+numpy>=1.24.0
+pandas>=2.0.0
+scipy>=1.10.0
+statsmodels>=0.14.0
+
+# Data fetching
+yfinance>=0.2.31
+
+# Data storage and caching
+pyarrow>=14.0.0
+
+# Technical analysis (optional, for extended indicators)
+ta>=0.10.2
+
+# Visualization (optional, for plotting)
+matplotlib>=3.7.0
+plotly>=5.15.0
+
+# Progress bars (optional)
+tqdm>=4.65.0
+
+# Async support
+aiohttp>=3.8.0
+
+# Reinforcement Learning
+stable-baselines3>=2.1.0
+gymnasium>=0.29.0
+torch>=2.0.0
+
+# Type checking (development)
+mypy>=1.5.0
+types-requests>=2.31.0
+
+# Testing (development)
+pytest>=7.4.0
+pytest-asyncio>=0.21.0
+pytest-cov>=4.1.0
+
+# Code quality (development)
+black>=23.7.0
+isort>=5.12.0
+flake8>=6.1.0

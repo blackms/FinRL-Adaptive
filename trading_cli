@@ -1,0 +1,29 @@
+#!/opt/FinRL/venv/bin/python3
+"""
+Trading System CLI Entry Point
+
+This script serves as the executable entry point for the trading CLI.
+It uses the virtual environment at /opt/FinRL/venv.
+
+Usage:
+    ./trading_cli --help
+    ./trading_cli backtest --symbols AAPL,MSFT
+    ./trading_cli signals --symbol AAPL
+    ./trading_cli risk --symbol AAPL
+    ./trading_cli list-symbols
+"""
+
+import os
+import sys
+
+# Add the src directory to the Python path
+script_dir = os.path.dirname(os.path.abspath(__file__))
+src_dir = os.path.join(script_dir, "src")
+if src_dir not in sys.path:
+    sys.path.insert(0, src_dir)
+
+# Import and run the CLI
+from trading.cli import main
+
+if __name__ == "__main__":
+    main()
