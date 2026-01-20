@@ -177,6 +177,257 @@ else:                   # Meh
 
 <br/>
 
+## 🏗️ Architecture (C4 Diagrams)
+
+<details>
+<summary><b>🔭 Level 1: System Context</b> - The Big Picture</summary>
+
+<br/>
+
+```mermaid
+C4Context
+    title System Context Diagram - FinRL Adaptive Trading System
+
+    Person(trader, "Quant Trader", "Runs backtests, trains models, analyzes performance")
+    Person(researcher, "Research Analyst", "Develops new strategies and factors")
+
+    System(finrl, "FinRL Adaptive", "Institutional-grade quantitative trading system with multi-factor alpha and regime-adaptive exposure")
+
+    System_Ext(yahoo, "Yahoo Finance", "Historical OHLCV market data")
+    System_Ext(broker, "Broker API", "Live trading execution (future)")
+
+    Rel(trader, finrl, "Runs backtests, trains RL agents")
+    Rel(researcher, finrl, "Develops strategies, analyzes factors")
+    Rel(finrl, yahoo, "Fetches historical data", "REST API")
+    Rel(finrl, broker, "Executes trades", "REST API")
+
+    UpdateLayoutConfig($c4ShapeInRow="2", $c4BoundaryInRow="1")
+```
+
+</details>
+
+<details>
+<summary><b>📦 Level 2: Container Diagram</b> - Inside the System</summary>
+
+<br/>
+
+```mermaid
+C4Container
+    title Container Diagram - FinRL Adaptive
+
+    Person(trader, "Quant Trader", "Power user")
+
+    System_Boundary(finrl, "FinRL Adaptive") {
+        Container(cli, "CLI Interface", "Python/Click", "Command-line scripts for backtesting and training")
+        Container(backtest, "Backtest Engine", "Python", "Walk-forward validation, performance analytics")
+        Container(strategies, "Strategy Engine", "Python", "Multi-factor alpha, regime detection, portfolio construction")
+        Container(rl, "RL Environment", "Gymnasium/SB3", "Training environment for PPO, SAC, A2C, DDPG, TD3")
+        Container(data, "Data Layer", "Python/Pandas", "Market data fetching, caching, preprocessing")
+        ContainerDb(cache, "Data Cache", "Parquet Files", "Cached OHLCV data")
+        ContainerDb(models, "Model Store", "Pickle/Zip", "Trained RL models")
+    }
+
+    System_Ext(yahoo, "Yahoo Finance", "Market data provider")
+
+    Rel(trader, cli, "Runs commands")
+    Rel(cli, backtest, "Triggers backtests")
+    Rel(cli, rl, "Trains agents")
+    Rel(backtest, strategies, "Executes strategies")
+    Rel(strategies, data, "Requests market data")
+    Rel(rl, strategies, "Uses for environment")
+    Rel(data, yahoo, "Fetches data", "yfinance")
+    Rel(data, cache, "Reads/writes cache")
+    Rel(rl, models, "Saves/loads models")
+
+    UpdateLayoutConfig($c4ShapeInRow="3", $c4BoundaryInRow="1")
+```
+
+</details>
+
+<details>
+<summary><b>🔧 Level 3: Component Diagram</b> - Strategy Engine Deep Dive</summary>
+
+<br/>
+
+```mermaid
+C4Component
+    title Component Diagram - Strategy Engine
+
+    Container_Boundary(strategies, "Strategy Engine") {
+        Component(hedge_fund, "HedgeFundStrategy", "Python Class", "Main adaptive strategy with regime detection")
+        Component(factors, "Factor Calculator", "Python Module", "Momentum, Value, Quality, Low Vol factors")
+        Component(regime, "Regime Detector", "Python Module", "Bull/Bear/Neutral classification")
+        Component(portfolio, "Portfolio Constructor", "Python Module", "Risk parity, volatility targeting")
+        Component(risk, "Risk Manager", "Python Module", "Position limits, exposure constraints")
+        Component(costs, "Cost Model", "Python Module", "Commission, slippage, borrow costs")
+    }
+
+    Container(backtest, "Backtest Engine", "Python", "Orchestrates strategy execution")
+    Container(data, "Data Layer", "Python", "Provides OHLCV data")
+
+    Rel(backtest, hedge_fund, "Runs strategy")
+    Rel(hedge_fund, factors, "Calculates alpha scores")
+    Rel(hedge_fund, regime, "Detects market regime")
+    Rel(hedge_fund, portfolio, "Constructs portfolio")
+    Rel(portfolio, risk, "Applies constraints")
+    Rel(hedge_fund, costs, "Calculates transaction costs")
+    Rel(factors, data, "Uses price history")
+    Rel(regime, data, "Analyzes trends")
+
+    UpdateLayoutConfig($c4ShapeInRow="3", $c4BoundaryInRow="1")
+```
+
+</details>
+
+<details>
+<summary><b>⚡ Trading Flow Sequence</b> - How Trades Happen</summary>
+
+<br/>
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant CLI as 🖥️ CLI
+    participant BE as 🔄 Backtest Engine
+    participant HF as 🧠 Hedge Fund Strategy
+    participant FC as 📊 Factor Calculator
+    participant RD as 🌡️ Regime Detector
+    participant PC as ⚖️ Portfolio Constructor
+    participant RM as 🛡️ Risk Manager
+
+    CLI->>BE: Run backtest(config)
+    BE->>BE: Load historical data
+
+    loop Each Trading Day
+        BE->>HF: Process day(prices)
+
+        alt Rebalance Day
+            HF->>FC: Calculate factors(history)
+            FC-->>HF: Factor scores
+
+            HF->>RD: Detect regime(history)
+            RD-->>HF: Bull/Bear/Neutral
+
+            HF->>PC: Construct portfolio(scores, regime)
+            PC->>RM: Apply constraints(weights)
+            RM-->>PC: Adjusted weights
+            PC-->>HF: Final portfolio
+
+            HF->>HF: Calculate transaction costs
+            HF-->>BE: New positions
+        end
+
+        BE->>BE: Update portfolio value
+    end
+
+    BE-->>CLI: Performance metrics
+```
+
+</details>
+
+<details>
+<summary><b>🤖 RL Training Architecture</b> - How Agents Learn</summary>
+
+<br/>
+
+```mermaid
+flowchart TB
+    subgraph Environment["🎮 Trading Environment (Gymnasium)"]
+        STATE["State Vector<br/>━━━━━━━━━━━━━━<br/>• Cash balance<br/>• Stock holdings<br/>• Current prices<br/>• Technical indicators"]
+        ACTION["Action Space<br/>━━━━━━━━━━━━━━<br/>Continuous [-1, 1]<br/>per stock<br/>(sell ↔ buy)"]
+        REWARD["Reward Function<br/>━━━━━━━━━━━━━━<br/>Portfolio value<br/>change × scaling"]
+    end
+
+    subgraph Agent["🧠 RL Agent (Stable-Baselines3)"]
+        POLICY["Policy Network<br/>━━━━━━━━━━━━━━<br/>MLP: 64→64→actions"]
+        VALUE["Value Network<br/>━━━━━━━━━━━━━━<br/>MLP: 64→64→1"]
+        BUFFER["Replay Buffer<br/>━━━━━━━━━━━━━━<br/>(s, a, r, s', done)"]
+    end
+
+    subgraph Training["🔄 Training Loop"]
+        SAMPLE["Sample batch"]
+        UPDATE["Update networks"]
+        EXPLORE["Explore vs Exploit"]
+    end
+
+    STATE --> POLICY
+    POLICY --> ACTION
+    ACTION --> REWARD
+    REWARD --> BUFFER
+    BUFFER --> SAMPLE
+    SAMPLE --> UPDATE
+    UPDATE --> POLICY
+    UPDATE --> VALUE
+    EXPLORE --> POLICY
+
+    style Environment fill:#1a1a2e,stroke:#16213e,color:#fff
+    style Agent fill:#0f3460,stroke:#16213e,color:#fff
+    style Training fill:#533483,stroke:#16213e,color:#fff
+```
+
+</details>
+
+<details>
+<summary><b>📈 Data Flow Architecture</b> - From Market to Alpha</summary>
+
+<br/>
+
+```mermaid
+flowchart LR
+    subgraph External["🌐 External"]
+        YAHOO["Yahoo Finance<br/>API"]
+    end
+
+    subgraph DataLayer["📊 Data Layer"]
+        FETCH["Fetcher<br/>━━━━━━━━<br/>yfinance"]
+        CACHE["Cache<br/>━━━━━━━━<br/>.parquet"]
+        PREP["Preprocessor<br/>━━━━━━━━<br/>Normalize<br/>Add indicators"]
+    end
+
+    subgraph FactorEngine["🧮 Factor Engine"]
+        MOM["Momentum<br/>━━━━━━━━<br/>60d return<br/>skip 5d"]
+        VAL["Value<br/>━━━━━━━━<br/>-21d return<br/>contrarian"]
+        QUAL["Quality<br/>━━━━━━━━<br/>R² × pos%"]
+        VOL["Low Vol<br/>━━━━━━━━<br/>1/σ"]
+    end
+
+    subgraph Scoring["🎯 Scoring"]
+        ZSCORE["Z-Score<br/>Normalize"]
+        COMPOSITE["Composite<br/>━━━━━━━━<br/>0.5×M + 0.2×Q<br/>+ 0.15×V + 0.15×L"]
+        RANK["Rank<br/>Stocks"]
+    end
+
+    subgraph Portfolio["💼 Portfolio"]
+        LONG["Long Book<br/>Top 50%"]
+        SHORT["Short Book<br/>Bottom 5%"]
+        WEIGHTS["Risk Parity<br/>Weights"]
+    end
+
+    YAHOO --> FETCH
+    FETCH <--> CACHE
+    FETCH --> PREP
+    PREP --> MOM & VAL & QUAL & VOL
+    MOM & VAL & QUAL & VOL --> ZSCORE
+    ZSCORE --> COMPOSITE
+    COMPOSITE --> RANK
+    RANK --> LONG & SHORT
+    LONG & SHORT --> WEIGHTS
+
+    style External fill:#e74c3c,stroke:#c0392b,color:#fff
+    style DataLayer fill:#3498db,stroke:#2980b9,color:#fff
+    style FactorEngine fill:#9b59b6,stroke:#8e44ad,color:#fff
+    style Scoring fill:#1abc9c,stroke:#16a085,color:#fff
+    style Portfolio fill:#f39c12,stroke:#d68910,color:#fff
+```
+
+</details>
+
+<br/>
+
+---
+
+<br/>
+
 ## 🤖 Reinforcement Learning Mode
 
 Train AI agents that learn to trade. Five algorithms, one goal: **alpha**.
