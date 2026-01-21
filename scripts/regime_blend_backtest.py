@@ -32,6 +32,9 @@ from trading.data.fetcher import SP500DataFetcher, CacheConfig
 from trading.strategies.regime_detector import RegimeDetector, RegimeDetectorConfig, RegimeType
 from trading.strategies.hedge_fund import HedgeFundConfig, run_hedge_fund_backtest
 from trading.strategies.momentum import MomentumConfig
+from trading.strategies.enhanced_risk_manager import (
+    EnhancedRiskManager, EnhancedRiskConfig, RiskLevel, fetch_vix_data
+)
 
 
 # ============================================================================
@@ -39,7 +42,7 @@ from trading.strategies.momentum import MomentumConfig
 # ============================================================================
 
 SYMBOLS = ["AAPL", "MSFT", "GOOGL", "AMZN", "NVDA"]
-START_DATE = "2020-01-01"
+START_DATE = "2004-12-01"  # GOOGL IPO + 70 day warmup for factor calculation
 END_DATE = "2024-12-31"
 INITIAL_CAPITAL = 100000
 WARMUP_DAYS = 100  # Days needed for regime detection and factor calculation
@@ -81,6 +84,9 @@ class RegimeAwareStrategy:
     In bull markets: Emphasizes momentum for capturing trends
     In bear markets: Emphasizes defensive hedge fund positioning
     In sideways/volatile: Balanced approach with reduced exposure
+
+    ENHANCED: Includes VIX-based leading indicators, volatility spike detection,
+    and portfolio-level stop-loss for proactive bear protection.
     """
 
     def __init__(
@@ -88,6 +94,8 @@ class RegimeAwareStrategy:
         symbols: List[str],
         initial_capital: float = 100000,
         regime_config: Optional[RegimeDetectorConfig] = None,
+        risk_config: Optional[EnhancedRiskConfig] = None,
+        vix_data: Optional[pd.DataFrame] = None,
     ):
         self.symbols = symbols
         self.initial_capital = initial_capital
@@ -95,6 +103,13 @@ class RegimeAwareStrategy:
 
         # Initialize regime detector
         self.regime_detector = RegimeDetector(regime_config or RegimeDetectorConfig())
+
+        # Initialize enhanced risk manager (NEW)
+        self.risk_manager = EnhancedRiskManager(risk_config or EnhancedRiskConfig())
+        self.vix_data = vix_data
+
+        # Risk tracking
+        self.risk_signals: List[Tuple[datetime, RiskLevel, float]] = []  # date, level, exposure
 
         # Strategy configurations
         self.momentum_config = MomentumConfig(
@@ -275,13 +290,60 @@ class RegimeAwareStrategy:
         data: Dict[str, pd.DataFrame],
         regime: RegimeType,
         confidence: float,
-    ) -> Dict[str, float]:
+        portfolio_value: float,
+        current_date: Optional[datetime] = None,
+    ) -> Tuple[Dict[str, float], float]:
         """
         Generate blended signals for all symbols based on current regime.
-        Returns dict of symbol -> target weight.
+        Returns tuple of (signals dict, risk_exposure_multiplier).
+
+        ENHANCED: Now includes risk manager's proactive exposure adjustment
+        based on VIX, volatility spikes, and stop-losses.
         """
         weights = self.regime_weights.get(regime, {"momentum": 0.35, "adaptive_hf": 0.65})
-        exposure = self.regime_exposure.get(regime, 0.70)
+        base_exposure = self.regime_exposure.get(regime, 0.70)
+
+        # Get risk manager assessment (NEW)
+        # Create market proxy for risk assessment
+        all_closes = []
+        for symbol, df in data.items():
+            if len(df) > 0:
+                close_col = 'Close' if 'Close' in df.columns else 'close'
+                all_closes.append(df[[close_col]].rename(columns={close_col: symbol}))
+
+        if all_closes:
+            market_proxy = pd.concat(all_closes, axis=1).mean(axis=1)
+            proxy_df = pd.DataFrame({
+                'open': market_proxy.values,
+                'high': market_proxy.values * 1.01,
+                'low': market_proxy.values * 0.99,
+                'close': market_proxy.values,
+            }, index=market_proxy.index)
+        else:
+            proxy_df = pd.DataFrame()
+
+        # Get VIX data for this date if available
+        vix_slice = None
+        if self.vix_data is not None and current_date is not None:
+            try:
+                vix_slice = self.vix_data[self.vix_data.index <= current_date].tail(30)
+            except:
+                pass
+
+        # Assess risk using enhanced risk manager
+        risk_signal = self.risk_manager.assess_risk(
+            portfolio_value=portfolio_value,
+            market_data=proxy_df,
+            vix_data=vix_slice,
+            current_date=current_date,
+        )
+
+        # Track risk signal
+        self.risk_signals.append((current_date, risk_signal.risk_level, risk_signal.exposure_multiplier))
+
+        # Apply MINIMUM of regime exposure and risk manager exposure
+        # This ensures we're defensive when EITHER system says to be
+        final_exposure = min(base_exposure, risk_signal.exposure_multiplier)
 
         signals = {}
         for symbol in self.symbols:
@@ -296,15 +358,15 @@ class RegimeAwareStrategy:
             # Blend signals
             blended = weights['momentum'] * mom_signal + weights['adaptive_hf'] * hf_signal
 
-            # Scale by exposure
-            blended *= exposure
+            # Scale by COMBINED exposure (regime + risk manager)
+            blended *= final_exposure
 
             # Adjust by regime confidence
             blended *= (0.5 + 0.5 * confidence)
 
             signals[symbol] = blended
 
-        return signals
+        return signals, risk_signal.exposure_multiplier
 
     def signals_to_weights(self, signals: Dict[str, float]) -> Dict[str, float]:
         """Convert signals to portfolio weights."""
@@ -356,11 +418,42 @@ def run_regime_aware_backtest(
     start_date: str,
     end_date: str,
     rebalance_freq: int = 5,  # Rebalance every 5 days
+    vix_data: Optional[pd.DataFrame] = None,
 ) -> Dict[str, Any]:
     """
     Run backtest with regime-aware blended strategy.
+
+    ENHANCED: Now includes VIX-based leading indicators, volatility spike
+    detection, and portfolio stop-losses for proactive bear protection.
     """
-    strategy = RegimeAwareStrategy(symbols, capital)
+    # Configure enhanced risk management (AGGRESSIVE for better bear protection)
+    risk_config = EnhancedRiskConfig(
+        # Lower VIX thresholds for earlier detection
+        vix_normal=12.0,        # was 15
+        vix_elevated=16.0,      # was 20 - start reducing at lower VIX
+        vix_high=20.0,          # was 25
+        vix_extreme=25.0,       # was 30
+        vix_crisis=35.0,        # was 40
+        # More sensitive volatility spike detection
+        vol_spike_threshold=1.3,  # was 1.5 (30% increase = spike, not 50%)
+        vol_spike_lookback=3,     # faster detection (3 days vs default 5)
+        # Tighter stop-losses
+        stop_loss_portfolio=0.12,  # was 0.15 (12% max drawdown)
+        stop_loss_trailing=0.08,   # was 0.10 (8% trailing stop)
+        stop_loss_daily=0.04,      # was 0.05 (4% daily limit)
+        # Faster drawdown response
+        drawdown_threshold_1=0.03,  # 3% DD -> reduce 10%
+        drawdown_threshold_2=0.06,  # 6% DD -> reduce 25%
+        drawdown_threshold_3=0.10,  # 10% DD -> reduce 50%
+        drawdown_threshold_4=0.15,  # 15% DD -> reduce 75%
+        # CRASH DETECTION (fastest signal)
+        crash_1day_threshold=-0.025,  # 2.5% drop in 1 day
+        crash_3day_threshold=-0.04,   # 4% drop in 3 days
+        crash_5day_threshold=-0.06,   # 6% drop in 5 days
+        crash_enabled=True,
+    )
+
+    strategy = RegimeAwareStrategy(symbols, capital, vix_data=vix_data, risk_config=risk_config)
 
     # Get common trading dates
     common_dates = sorted(set.intersection(*[set(data[s].index) for s in symbols]))
@@ -389,6 +482,10 @@ def run_regime_aware_backtest(
     # Performance by regime
     regime_returns: Dict[RegimeType, List[float]] = {r: [] for r in RegimeType}
 
+    # Track emergency de-risk events
+    emergency_derisk_count = 0
+    last_risk_level = RiskLevel.NORMAL
+
     for i, date in enumerate(trading_dates):
         # Get historical data up to this date
         hist_data = {s: df[df.index <= date].tail(120) for s, df in data.items()}
@@ -399,6 +496,69 @@ def run_regime_aware_backtest(
         # Calculate portfolio value
         position_value = sum(positions.get(s, 0) * prices.get(s, 0) for s in symbols)
         current_value = cash + position_value
+
+        # ========== DAILY RISK CHECK (NEW) ==========
+        # Check risk signals EVERY day for emergency de-risking
+        # Create market proxy for risk assessment
+        all_closes = []
+        for symbol_check, df_check in hist_data.items():
+            if len(df_check) > 0:
+                close_col = 'Close' if 'Close' in df_check.columns else 'close'
+                all_closes.append(df_check[[close_col]].rename(columns={close_col: symbol_check}))
+
+        if all_closes:
+            market_proxy = pd.concat(all_closes, axis=1).mean(axis=1)
+            proxy_df = pd.DataFrame({
+                'open': market_proxy.values,
+                'high': market_proxy.values * 1.01,
+                'low': market_proxy.values * 0.99,
+                'close': market_proxy.values,
+            }, index=market_proxy.index)
+        else:
+            proxy_df = pd.DataFrame()
+
+        # Get VIX slice for this date
+        vix_slice = None
+        if vix_data is not None:
+            try:
+                vix_slice = vix_data[vix_data.index <= date].tail(30)
+            except:
+                pass
+
+        # Assess risk using enhanced risk manager
+        risk_signal = strategy.risk_manager.assess_risk(
+            portfolio_value=current_value,
+            market_data=proxy_df,
+            vix_data=vix_slice,
+            current_date=date,
+        )
+
+        # EMERGENCY DE-RISKING: If risk level is HIGH or worse, reduce positions immediately
+        if risk_signal.risk_level in [RiskLevel.HIGH, RiskLevel.EXTREME, RiskLevel.CRISIS]:
+            if last_risk_level not in [RiskLevel.HIGH, RiskLevel.EXTREME, RiskLevel.CRISIS]:
+                # Just entered high risk state - emergency de-risk
+                emergency_exposure = risk_signal.exposure_multiplier
+                for symbol in symbols:
+                    if symbol not in prices or positions.get(symbol, 0) <= 0:
+                        continue
+
+                    current_shares = positions[symbol]
+                    # Reduce to emergency_exposure level
+                    target_shares = current_shares * emergency_exposure
+                    sell_shares = current_shares - target_shares
+
+                    if sell_shares > 0.01:
+                        sell_value = sell_shares * prices[symbol]
+                        positions[symbol] = target_shares
+                        cash += sell_value
+                        # Transaction cost
+                        cost = sell_value * 0.001
+                        cash -= cost
+                        trade_count += 1
+                        emergency_derisk_count += 1
+
+        last_risk_level = risk_signal.risk_level
+        # ========== END DAILY RISK CHECK ==========
 
         # Detect regime
         regime, confidence = strategy.detect_regime(hist_data, date)
@@ -425,8 +585,12 @@ def run_regime_aware_backtest(
         should_rebalance = (i == 0 or i % rebalance_freq == 0)
 
         if should_rebalance:
-            # Generate blended signals
-            signals = strategy.generate_blended_signals(hist_data, regime, confidence)
+            # Generate blended signals (with enhanced risk management)
+            signals, risk_exposure = strategy.generate_blended_signals(
+                hist_data, regime, confidence,
+                portfolio_value=current_value,
+                current_date=date
+            )
 
             # Convert to weights
             new_weights = strategy.signals_to_weights(signals)
@@ -855,17 +1019,29 @@ def main():
     print(f"   Period:   {START_DATE} to {END_DATE}")
     print(f"   Capital:  ${INITIAL_CAPITAL:,}")
     print(f"   Strategy: Regime-adaptive momentum + hedge fund blend")
+    print(f"   Enhanced: VIX leading indicator + volatility spike detection + stop-losses")
 
     # Fetch data
     print("\nFetching data...")
     data = fetch_data(SYMBOLS, START_DATE, END_DATE)
     print(f"   Loaded {len(data)} stocks")
 
+    # Fetch VIX data for enhanced risk management
+    print("   Fetching VIX data for leading indicator...")
+    vix_data = fetch_vix_data(START_DATE, END_DATE)
+    if len(vix_data) > 0:
+        print(f"   Loaded VIX data: {len(vix_data)} days")
+    else:
+        print("   Warning: VIX data unavailable, using synthetic volatility")
+
     # Run backtests
     print("\nRunning backtests...")
 
-    print("   1. Regime-aware blended strategy...")
-    regime_result = run_regime_aware_backtest(data, SYMBOLS, INITIAL_CAPITAL, START_DATE, END_DATE)
+    print("   1. Regime-aware blended strategy (ENHANCED)...")
+    regime_result = run_regime_aware_backtest(
+        data, SYMBOLS, INITIAL_CAPITAL, START_DATE, END_DATE,
+        vix_data=vix_data
+    )
 
     print("   2. Pure momentum strategy...")
     momentum_result = run_pure_momentum_backtest(data, SYMBOLS, INITIAL_CAPITAL, START_DATE, END_DATE)

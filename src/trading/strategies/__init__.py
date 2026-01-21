@@ -32,6 +32,33 @@ from .strategy_blender import (
     BlendedSignal,
     DEFAULT_REGIME_WEIGHTS,
 )
+from .enhanced_risk_manager import (
+    EnhancedRiskManager,
+    EnhancedRiskConfig,
+    RiskLevel,
+    RiskSignal,
+    fetch_vix_data,
+)
+from .multi_regime_system import (
+    RegimeOrchestrator,
+    OrchestratorConfig,
+    BullMarketSystem,
+    BullSystemConfig,
+    BearMarketSystem,
+    BearSystemConfig,
+    SidewaysMarketSystem,
+    SidewaysSystemConfig,
+    HighVolatilitySystem,
+    HighVolSystemConfig,
+    create_default_orchestrator,
+)
+from .enhanced_bear_system import (
+    EnhancedBearSystem,
+    EnhancedBearConfig,
+    BearStrategy,
+    simulate_inverse_etf_returns,
+    simulate_vix_returns,
+)
 
 __all__ = [
     "BaseStrategy",
@@ -65,4 +92,25 @@ __all__ = [
     "StrategyWeight",
     "BlendedSignal",
     "DEFAULT_REGIME_WEIGHTS",
+    "EnhancedRiskManager",
+    "EnhancedRiskConfig",
+    "RiskLevel",
+    "RiskSignal",
+    "fetch_vix_data",
+    "RegimeOrchestrator",
+    "OrchestratorConfig",
+    "BullMarketSystem",
+    "BullSystemConfig",
+    "BearMarketSystem",
+    "BearSystemConfig",
+    "SidewaysMarketSystem",
+    "SidewaysSystemConfig",
+    "HighVolatilitySystem",
+    "HighVolSystemConfig",
+    "create_default_orchestrator",
+    "EnhancedBearSystem",
+    "EnhancedBearConfig",
+    "BearStrategy",
+    "simulate_inverse_etf_returns",
+    "simulate_vix_returns",
 ]
